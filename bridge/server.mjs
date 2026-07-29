@@ -35,6 +35,7 @@ import {
   WebSocketHeartbeat,
   closeFrame,
   decodeFrames,
+  pingFrame,
   pongFrame,
   websocketFrame,
 } from './websocket.mjs';
@@ -59,7 +60,7 @@ const server = http.createServer((req, res) => {
 const heartbeat = new WebSocketHeartbeat({
   ping: (socket) => {
     try {
-      socket.write(pongFrame(Buffer.alloc(0)));
+      socket.write(pingFrame());
     } catch {
       // The reaper will deal with it on the next tick.
     }
