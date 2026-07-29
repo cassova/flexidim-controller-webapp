@@ -1,0 +1,75 @@
+services:
+  flexidim-web:
+    build: .
+    image: flexidim-controller:local
+    # The image's default command starts web + bridge together for
+    # single-container deployments; this stack runs them as separate services,
+    # so each picks its own process explicitly.
+    command: ["node", "server/host.mjs"]
+    environment:
+      FLEXIDIM_BRIDGE_UPSTREAM_HOST: flexidim-bridge
+      FLEXIDIM_BRIDGE_UPSTREAM_PORT: 8765
+    ports:
+      # Bound to all interfaces on purpose: a phone on the same Wi-Fi loads the
+      # page from the computer's LAN address, and the /bridge proxy means that
+      # is the only port it ever needs.
+      - "3000:3000"
+    depends_on:
+      flexidim-bridge:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 5s
+    restart: unless-stopped
+
+  flexidim-bridge:
+    # The web service builds this shared image. Declaring `build` here as well
+    # makes Compose build and tag it a second time, leaving a duplicate dangling
+    # image on every rebuild.
+    image: flexidim-controller:local
+    command: ["node", "bridge/server.mjs"]
+    environment:
+      FLEXIDIM_BRIDGE_HOST: 0.0.0.0
+      FLEXIDIM_BRIDGE_PORT: 8765
+      # Docker exposes only its own container subnet to the bridge, so a
+      # limited broadcast never reaches the house LAN. `task` fills this with
+      # the computer's LAN address and the bridge derives that subnet's
+      # directed broadcast from it, which does get routed out. Discovery still
+      # falls back to a TCP sweep when Docker Desktop prevents the UDP reply
+      # from returning.
+      FLEXIDIM_DISCOVERY_SEED: ${FLEXIDIM_DISCOVERY_SEED:-}
+      CONFIG_DIR: /config
+    volumes:
+      # The saved systems and their security keys. Only the bridge needs this:
+      # the web service never sees a key. Named and reused, so `compose down`
+      # and a rebuild both keep it — `task clean:config` is the only way to
+      # deliberately discard it.
+      - flexidim-config:/config
+    # Deliberately not published to the host. The only client is the web
+    # service, over the compose network.
+    expose:
+      - "8765"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8765/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 5s
+    restart: unless-stopped
+
+volumes:
+  # Survives `compose down` and every rebuild on purpose: losing it means
+  # typing the security key again on a system that exists to avoid exactly
+  # that. `task clean:config` is the only thing that removes it.
+  flexidim-config:

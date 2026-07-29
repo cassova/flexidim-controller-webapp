@@ -1,0 +1,41 @@
+# Host-networking overlay — Linux hosts only (a NAS, a Pi, a Linux server).
+#
+#   docker compose -f compose.yaml -f compose.host-network.yaml up -d
+#   task up:host
+#
+# Why bother: in the default bridge network the container's "broadcast" only
+# reaches Docker's own subnet, so the UDP discovery probe never gets to the
+# lighting controller and Find never finds anything. On Linux, host networking
+# puts both processes directly on the LAN, so discovery works and the bridge
+# reaches the controller without any address translation.
+#
+# This does NOT work on Docker Desktop for macOS or Windows, where containers
+# run inside a Linux VM and `network_mode: host` is the VM's network, not the
+# computer's. Use the default compose.yaml there and type the controller's
+# address by hand.
+#
+# Trade-offs of host networking, all acceptable for a home LAN appliance:
+#   - `ports:` is ignored; the services bind the host's interfaces directly, so
+#     the web app is on <nas-address>:3000 and nothing else changes.
+#   - The bridge's 8765 becomes reachable from the LAN rather than only from the
+#     web container. It still refuses public origins and still does nothing
+#     without the 16-character security key.
+services:
+  flexidim-web:
+    network_mode: host
+    environment:
+      # Both processes share the host's network namespace, so the bridge is
+      # simply on loopback from the web host's point of view.
+      FLEXIDIM_BRIDGE_UPSTREAM_HOST: 127.0.0.1
+      FLEXIDIM_BRIDGE_UPSTREAM_PORT: 8765
+
+  flexidim-bridge:
+    network_mode: host
+    environment:
+      # Loopback is enough: the web host is in the same namespace, and this
+      # keeps the bridge off the LAN even though the namespace is shared.
+      FLEXIDIM_BRIDGE_HOST: 127.0.0.1
+      FLEXIDIM_BRIDGE_PORT: 8765
+      # Unnecessary here — a real broadcast now leaves the machine — but
+      # harmless, and it keeps one env contract across both deployments.
+      FLEXIDIM_DISCOVERY_SEED: ${FLEXIDIM_DISCOVERY_SEED:-}

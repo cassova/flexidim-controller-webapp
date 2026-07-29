@@ -1,0 +1,165 @@
+version: "3"
+
+# Task runner for the FlexiDim controller webapp.
+#   task up     bring the compose stack up
+#   task down   take it down
+#   task test   run the test suite
+#   task        list everything
+
+vars:
+  COMPOSE: docker compose
+  # Selects only dangling images created by this Compose project, so a prune
+  # never touches images or build cache belonging to anything else.
+  PROJECT_LABEL: com.docker.compose.project=flexidim-controller-webapp
+  # Docker's bridge interface cannot reveal the computer's physical LAN subnet,
+  # so the discovery seed is passed in instead of being stored in the repo.
+  # macOS first, then Linux (`hostname -I` is absent on BusyBox, hence the `ip`
+  # fallback). Every branch ends in `true` so an unknown platform yields an
+  # empty seed rather than failing the task.
+  HOST_LAN_DISCOVERY_SEED:
+    sh: >-
+      ipconfig getifaddr en0 2>/dev/null
+      || hostname -I 2>/dev/null | awk '{print $1}'
+      || ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{print $7}'
+      || true
+
+env:
+  FLEXIDIM_DISCOVERY_SEED: "{{.HOST_LAN_DISCOVERY_SEED}}"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  up:
+    desc: Start the web + bridge stack (web on :3000) — use `task rebuild` after code changes
+    cmds:
+      - task: ensure:image
+      - "{{.COMPOSE}} up --no-build"
+
+  up:host:
+    desc: >-
+      Start the stack on the host's network — Linux only (NAS, Pi, server).
+      Makes UDP controller discovery actually work. Does nothing useful on
+      Docker Desktop for macOS or Windows; use `task up` there.
+    cmds:
+      - task: ensure:image
+      - "{{.COMPOSE}} -f compose.yaml -f compose.host-network.yaml up -d --no-build"
+      - "{{.COMPOSE}} -f compose.yaml -f compose.host-network.yaml ps"
+
+  down:host:
+    desc: Stop the host-network stack
+    cmds:
+      - "{{.COMPOSE}} -f compose.yaml -f compose.host-network.yaml down"
+
+  rebuild:
+    desc: Rebuild the image and start the stack (run after changing code or deps)
+    cmds:
+      # Compose-built images are ordinary dangling images, not BuildKit cache.
+      # Pruning this project's before each build keeps repeated rebuilds bounded
+      # without touching other projects.
+      - docker image prune -f --filter "label={{.PROJECT_LABEL}}"
+      - "{{.COMPOSE}} build flexidim-web"
+      - "{{.COMPOSE}} up --no-build"
+
+  ensure:image:
+    internal: true
+    cmds:
+      - "{{.COMPOSE}} build flexidim-web"
+    status:
+      - docker image inspect flexidim-controller:local
+
+  down:
+    desc: Stop and remove the stack
+    cmds:
+      - "{{.COMPOSE}} down"
+
+  restart:
+    desc: Stop and start the stack without rebuilding
+    cmds:
+      - task: down
+      - task: up
+
+  logs:
+    desc: Follow the stack's logs
+    cmds:
+      - "{{.COMPOSE}} logs -f"
+
+  address:
+    desc: Print the URL to open on a phone on the same Wi-Fi
+    cmds:
+      - 'echo "Open http://{{.HOST_LAN_DISCOVERY_SEED}}:3000 on your phone"'
+    silent: true
+
+  prune:
+    desc: Reclaim this project's dangling images and Docker build cache (never volumes)
+    cmds:
+      - docker image prune -f --filter "label={{.PROJECT_LABEL}}"
+      - docker builder prune -f
+      - docker system df
+
+  clean:config:
+    desc: DESTRUCTIVE — delete saved systems and their security keys
+    prompt: This deletes every saved system and its security key. You will have to type the key again. Continue?
+    cmds:
+      # The volume is the only copy: nothing is kept in the browser any more.
+      - "{{.COMPOSE}} down --volumes --remove-orphans"
+      - docker system df
+
+  clean:
+    desc: Remove this project's containers, image and build cache (KEEPS saved systems)
+    cmds:
+      # Scoped to this project on purpose: a bare `docker system prune -a` would
+      # take other projects' images with it.
+      - "{{.COMPOSE}} down --remove-orphans"
+      - docker image rm -f flexidim-controller:local || true
+      - docker image prune -f --filter "label={{.PROJECT_LABEL}}"
+      - docker builder prune -f
+      - docker system df
+
+  dev:
+    desc: Run the web host in development, without Docker (needs `task bridge` alongside)
+    cmds:
+      - npm run dev
+
+  bridge:
+    desc: Run the bridge on the host, without Docker
+    cmds:
+      - npm run bridge
+
+  emulator:
+    desc: Run an emulated Scene Controller on :15274 (no hardware needed)
+    cmds:
+      - node tools/controller-emulator.mjs
+
+  test:
+    desc: Run the whole test suite plus lint and a production build
+    cmds:
+      - task: test:unit
+      - task: lint
+      - task: build
+
+  test:unit:
+    desc: Protocol, user-profile and session tests (40)
+    cmds:
+      - npm test
+
+  smoke:
+    desc: >-
+      End-to-end check through the running stack. Uses the emulator unless
+      CONTROLLER_HOST and CONTROLLER_KEY are set. Sends no dim command unless
+      DIM_CHANNEL is set.
+    cmds:
+      - node tools/smoke.mjs
+
+  lint:
+    desc: eslint (expect 0 errors)
+    cmds:
+      - npm run lint
+
+  build:
+    desc: Production build
+    cmds:
+      - npm run build
