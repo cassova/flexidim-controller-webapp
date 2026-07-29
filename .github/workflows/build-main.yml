@@ -1,0 +1,148 @@
+name: Release tag, build and push image (main)
+
+# On every push to main:
+#   1. Compute the next vX.Y.Z from commit subjects in the pushed range and push the tag.
+#   2. Create a GitHub Release with auto-generated notes.
+#   3. Build the combined webapp+bridge image at that tag and push to GHCR as
+#      both `vX.Y.Z` and `latest`.
+#
+# Versioning matches flexidim-configuration-webapp: every push to main releases;
+# the bump defaults to patch, `feat:` commits bump minor, and
+# `feat!:`/`!feat:` commits bump major. `package.json` is NOT touched — the git
+# `v*` tag is the canonical release version.
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: flexidim-controller-webapp-build-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  bump-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.bump.outputs.version_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version from commits in push range
+        id: bump
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          # Latest v* tag on main, version-sorted.
+          LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname --merged origin/main | head -n1 || true)
+          if [[ -z "$LATEST_TAG" ]]; then
+            # No tags yet — the first automated release is pinned to v1.0.0.
+            FIRST_RELEASE=true
+            MAJOR=0; MINOR=0; PATCH=0
+            BASE="<none>"
+          else
+            FIRST_RELEASE=false
+            BASE="$LATEST_TAG"
+            VER="${LATEST_TAG#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<<"$VER"
+          fi
+          echo "Latest tag: ${BASE} (M.m.p = ${MAJOR}.${MINOR}.${PATCH})"
+
+          # Commit subjects in the pushed range. On first push / force-push
+          # BEFORE_SHA can be all zeros — fall back to last tag..HEAD.
+          ZEROES="0000000000000000000000000000000000000000"
+          if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" == "${ZEROES}" ]]; then
+            if [[ -n "${LATEST_TAG}" ]]; then
+              RANGE="${LATEST_TAG}..${AFTER_SHA}"
+            else
+              RANGE="${AFTER_SHA}"
+            fi
+          else
+            RANGE="${BEFORE_SHA}..${AFTER_SHA}"
+          fi
+          echo "Commit range: ${RANGE}"
+          SUBJECTS=$(git log --format=%s "${RANGE}" || true)
+          echo "Subjects:"
+          echo "${SUBJECTS}"
+
+          # Highest rule wins. Default = patch bump (every push to main releases).
+          BUMP="patch"
+          BREAKING_RE='^(!feat(\([^)]*\))?:|feat(\([^)]*\))!:)'
+          FEAT_RE='^feat(\([^)]*\))?:'
+
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            if [[ "$line" =~ $BREAKING_RE ]]; then
+              BUMP="major"
+              break
+            fi
+            if [[ "$line" =~ $FEAT_RE && "$BUMP" != "major" ]]; then
+              BUMP="minor"
+            fi
+          done <<<"${SUBJECTS}"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          if [[ "${FIRST_RELEASE}" == "true" ]]; then
+            NEW_TAG="v1.0.0"
+          else
+            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          echo "Bump: ${BUMP}  ->  ${NEW_TAG}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${NEW_TAG}" -m "Automated release ${NEW_TAG}"
+          git push origin "${NEW_TAG}"
+
+          echo "version_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ steps.bump.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          # Idempotent: a re-run for an existing tag is a no-op.
+          gh release create "${NEW_TAG}" --title "${NEW_TAG}" --generate-notes || true
+
+  build-docker:
+    needs: bump-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-tag.outputs.version_tag }}
+
+      - name: Log into GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push (vX.Y.Z + latest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          file: ./Dockerfile
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.bump-tag.outputs.version_tag }}
+            ghcr.io/${{ github.repository }}:latest

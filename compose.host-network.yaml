@@ -11,8 +11,8 @@
 #
 # This does NOT work on Docker Desktop for macOS or Windows, where containers
 # run inside a Linux VM and `network_mode: host` is the VM's network, not the
-# computer's. Use the default compose.yaml there and type the controller's
-# address by hand.
+# computer's. Use the default compose.yaml there; the bridge falls back to a
+# bounded TCP subnet search when the UDP reply cannot return.
 #
 # Trade-offs of host networking, all acceptable for a home LAN appliance:
 #   - `ports:` is ignored; the services bind the host's interfaces directly, so
